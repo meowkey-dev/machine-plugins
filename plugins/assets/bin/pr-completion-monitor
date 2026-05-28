@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# pr-completion-monitor — completion-only CI monitor for a dispatched-asset PR.
+#
+# Wakes the controller ONLY on terminal CI state (all checks done), not on every
+# PR-comment-count change or "agent is working…" placeholder churn. Optionally
+# tracks one highlight check (e.g. a review bot) and reports its verdict.
+#
+# Usage (wrap in the controller's Monitor tool):
+#   pr-completion-monitor <PR_NUMBER> [highlight_check_name]
+#
+#   $1  PR number (required)
+#   $2  highlight check name as it appears in `gh pr checks` (optional), e.g.
+#       "claude-review / claude-review" — its verdict is reported on each change
+#       and gated into the final completion line.
+#
+# Requires `gh` authenticated for the current repo.
+#
+# IMPORTANT caveat the controller MUST honor: a check `bucket=pass` does NOT
+# mean "no substantive findings." A review bot's GitHub status check passes
+# mechanically even when its comment body flags real issues. After this monitor
+# wakes on pass, the controller must still read the latest review comment body.
+
+set -euo pipefail
+
+PR="${1:?PR number required}"
+HIGHLIGHT="${2:-}"
+
+prev_hl=""
+while true; do
+  raw=$(gh pr checks "$PR" --json name,bucket 2>/dev/null || true)
+  if [ -z "$raw" ]; then
+    sleep 30
+    continue
+  fi
+
+  # Single pass over the checks. Emits four tab-separated fields:
+  #   pending  — 'yes' if any check is still non-terminal (gh buckets queued /
+  #              in_progress as 'pending'), or the list is empty (a freshly-opened
+  #              PR returns [] until GitHub registers the run — without this guard
+  #              any() over [] is False and we'd fire a spurious all-complete).
+  #   verdict  — 'red' if ANY check ended fail/cancel, else 'green'. Surfacing red
+  #              is the point of machine#135: a non-happy terminal state must wake
+  #              the controller, not hang silently.
+  #   failed   — comma-joined names of the fail/cancel checks (detail).
+  #   hl       — the highlight check's bucket if one was named, 'unknown' if named
+  #              but absent (run not attributed / workflow disabled / paths-ignore'd),
+  #              'n/a' if no highlight was named. Reported as a DETAIL only — never
+  #              a precondition for firing.
+  # Scope IFS to tabs only — check names routinely contain spaces (e.g.
+  # "build / lint"), so a default $IFS would split a spaced failed-check name
+  # mid-field and spill the remainder into the next field.
+  IFS=$'\t' read -r overall_pending verdict failed_names hl <<EOF
+$(echo "$raw" | HL="$HIGHLIGHT" python3 -c "
+import json, os, sys
+d = json.load(sys.stdin)
+name = os.environ.get('HL', '')
+pending = (not d) or any(x['bucket'] == 'pending' for x in d)
+failed = [x['name'] for x in d if x['bucket'] in ('fail', 'cancel')]
+hl = (next((x['bucket'] for x in d if x['name'] == name), 'unknown') if name else 'n/a')
+print('\t'.join([
+    'yes' if pending else 'no',
+    'red' if failed else 'green',
+    ','.join(failed) if failed else '-',
+    hl,
+]))
+")
+EOF
+
+  if [ -n "$HIGHLIGHT" ] && [ "$hl" != "$prev_hl" ]; then
+    case "$hl" in
+      pass|fail|skipping) echo "PR#${PR} ${HIGHLIGHT}:${hl}" ;;
+    esac
+  fi
+  prev_hl="$hl"
+
+  # Fire on ALL-CHECKS-TERMINAL — independent of the highlight check (machine#135).
+  # Previously this gated on the named highlight reaching a verdict, so it hung
+  # forever when the highlight check was paths-ignore'd / never attributed, or when
+  # an unrelated check went red while the highlight stayed slow. Now: any terminal
+  # state (green OR red) fires; the highlight verdict rides along as a detail.
+  if [ "$overall_pending" = "no" ]; then
+    msg="PR#${PR} all-checks-complete verdict=${verdict}"
+    [ "$verdict" = "red" ] && msg="${msg} failed=[${failed_names}]"
+    [ "$hl" != "n/a" ] && msg="${msg} ${HIGHLIGHT}:${hl}"
+    echo "$msg"
+    break
+  fi
+  sleep 30
+done

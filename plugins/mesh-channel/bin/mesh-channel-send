@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""
+mesh-channel-send — append one JSONL line to a mesh-channel file.
+
+Usage:
+    mesh-channel-send <channel-path> <from-name> <body>
+
+Body may be markdown — newlines, quotes, backticks all get JSON-encoded
+within the string field. A stray " in body will NOT break the line.
+
+Writes via O_APPEND with a single write() syscall. On Linux and macOS a
+single write() to a regular file with O_APPEND is appended atomically by
+the kernel (the inode lock serializes the seek-to-end + write); concurrent
+writers won't interleave each other's bytes within one call. We still cap
+each line at 4096 bytes as a conservative portability guard — exotic
+filesystems (e.g. NFS without locking) and very large writes may fall
+outside the atomicity guarantee.
+"""
+import json
+import os
+import sys
+import time
+
+
+def main() -> int:
+    if len(sys.argv) != 4:
+        print(
+            f"usage: {sys.argv[0]} <channel-path> <from-name> <body>",
+            file=sys.stderr,
+        )
+        return 2
+
+    channel_path, from_name, body = sys.argv[1], sys.argv[2], sys.argv[3]
+
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "from": from_name,
+        "body": body,
+    }
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+
+    if len(line.encode("utf-8")) >= 4096:
+        print(
+            "warning: line exceeds 4096 bytes; atomic-append guarantee may not hold on non-Linux/macOS filesystems",
+            file=sys.stderr,
+        )
+
+    fd = os.open(channel_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

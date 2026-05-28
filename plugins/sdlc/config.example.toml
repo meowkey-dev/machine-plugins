@@ -1,0 +1,57 @@
+# sdlc — optional per-repo overrides.  Copy to `.claude/sdlc.toml` in a consuming repo.
+#
+# CONVENTION FIRST: the loop runs with NO config. Every field below has a safe
+# default; you only write this file to override one. Start empty, add as needed.
+
+# schema_version — the upgrade-compatibility hinge. The plugin declares the
+# schema range it supports; a breaking change bumps this + ships a migration
+# (see UPGRADING.md). Current: 2 — PLAYBOOK is a reinforcement ledger over memory.
+# A repo still on schema 1 (prose PLAYBOOK) runs the 1→2 migration, then sets this to 2.
+schema_version = 2
+
+# playbook_path — the durable, repo-owned learning artifact that `review` and
+# `retro` read + append. Created on first use if absent.
+# default: "PLAYBOOK.md"
+playbook_path = "PLAYBOOK.md"
+
+# brief_rubric_path — repo-specific domain rubric the `dispatch` brief pulls in
+# (how to scope tests/verification for THIS codebase, runtime invariants,
+# deploy provenance, etc.). If absent, dispatch uses only the generic guidance.
+# default: ".claude/sdlc/brief.md"
+brief_rubric_path = ".claude/sdlc/brief.md"
+
+# frozen_paths — files an asset must NEVER edit without explicit authorization
+# (e.g. a prompt-hash freeze whose drift trips a production guard). Globs.
+# default: [] (nothing frozen)
+frozen_paths = []
+
+# invariant_paths — code paths whose change SHOULD be mirrored by a spec/doc
+# edit (drives the SDD soft-gate warning). Globs, repo-relative.
+# default: ["src"]
+invariant_paths = ["src"]
+
+# spec_doc — the doc the SDD gate expects to move alongside invariant_paths.
+# default: "SPEC.md"
+spec_doc = "SPEC.md"
+
+# code_glob / test_dir — drive the TDD soft-gate (code changed but tests didn't).
+# code_glob is a git PATHSPEC: a bare "*.py" matches .py at ANY depth (incl. the
+# repo root). Do NOT use "**/*.py" — in default (non-:(glob)) pathspec mode that
+# MISSES root-level files. Verified: `git ls-files -- '*.py'` ⊇ `'**/*.py'`.
+# default: code_glob = "*.py", test_dir = "tests"
+code_glob = "*.py"
+test_dir  = "tests"
+
+# default_branch — base the TDD new-branch diff against origin/<default_branch>.
+# Leave COMMENTED to auto-detect from origin/HEAD at install time (main/master/
+# trunk…). Uncomment ONLY to pin — a set value skips auto-detection.
+# default_branch = "main"
+
+# release_cmd — how this repo cuts a release tag (invoked by the `release` skill).
+# default: "" → the skill falls back to `git tag -a <tag>` + `gh release create`.
+release_cmd = ""
+
+# prod_gated — true if deploy / arm / posture / promote are real-world actions
+# that REQUIRE explicit human approval (the loop never auto-performs them).
+# default: false  (merge still needs approval regardless; this gates deploy-class ops)
+prod_gated = false

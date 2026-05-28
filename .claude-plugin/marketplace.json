@@ -1,0 +1,34 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "machine",
+  "description": "Machine plugins for long-running and multi-agent Claude Code workflows",
+  "owner": {
+    "name": "meowkey-dev"
+  },
+  "plugins": [
+    {
+      "name": "assets",
+      "description": "Local or remote tmux agent dispatch — spawn, monitor, and recall long-running coding agents in dedicated tmux windows",
+      "category": "development",
+      "source": "./plugins/assets"
+    },
+    {
+      "name": "mesh-channel",
+      "description": "Simple two-agent comms over a shared JSONL file — append-only protocol, per-agent cursor, Monitor-driven event wake",
+      "category": "development",
+      "source": "./plugins/mesh-channel"
+    },
+    {
+      "name": "sop-compact",
+      "description": "Hooks-only compaction-survival procedure for Claude Code. /init-sop-compact generates a per-repo .claude/sop-compact.md once; a PreCompact hook runs a claude -p sidecar that promotes durable learnings and writes a handoff snapshot before /compact; a SessionStart hook (gated on source=compact) points the new session at the latest handoff. Works with bare /compact (manual or auto).",
+      "category": "productivity",
+      "source": "./plugins/sop-compact"
+    },
+    {
+      "name": "sdlc",
+      "description": "Closed-loop software-development-lifecycle harness — takes a GitHub issue to a mergeable PR via dispatched assets, then folds learnings into a per-repo playbook. Repo-agnostic methodology (backlog → dispatch → report → review → retro skills, qa subagent, SDD/TDD soft gates); each repo supplies only its own artifacts. Depends on assets + mesh-channel.",
+      "category": "development",
+      "source": "./plugins/sdlc"
+    }
+  ]
+}

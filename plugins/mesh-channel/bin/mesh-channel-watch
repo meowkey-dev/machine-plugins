@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+mesh-channel-watch — watch a mesh-channel JSONL file and emit new lines
+from other agents (filtering out self-writes).
+
+Usage:
+    mesh-channel-watch <channel-path> <my-name> [--catch-up] [--poll <seconds>]
+
+Designed to be wrapped by the Monitor tool. Each line emitted on stdout
+becomes one notification. Runs until killed.
+
+Cursor (last-read byte offset) lives in a sidecar file at
+<channel-path>.cursor.<my-name>, so each agent advances independently.
+By default starts at EOF — does not replay backlog. Pass --catch-up to
+start at offset 0.
+"""
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def read_cursor(cursor_path: Path) -> int:
+    if not cursor_path.exists():
+        return -1
+    try:
+        return int(cursor_path.read_text().strip())
+    except (ValueError, OSError):
+        return -1
+
+
+def write_cursor(cursor_path: Path, offset: int) -> None:
+    tmp = cursor_path.with_suffix(cursor_path.suffix + ".tmp")
+    tmp.write_text(str(offset))
+    os.replace(tmp, cursor_path)
+
+
+def emit_new_lines(
+    channel_path: Path, cursor_path: Path, my_name: str, start_offset: int
+) -> int:
+    """Read new bytes since start_offset, emit other-agent lines, return new offset."""
+    try:
+        with channel_path.open("rb") as f:
+            f.seek(start_offset)
+            data = f.read()
+    except FileNotFoundError:
+        return start_offset
+
+    if not data:
+        return start_offset
+
+    last_newline = data.rfind(b"\n")
+    if last_newline == -1:
+        return start_offset
+
+    complete = data[: last_newline + 1]
+    new_offset = start_offset + len(complete)
+
+    for raw_line in complete.splitlines():
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            print(
+                f"{{\"_warning\": \"unparseable line\", \"raw\": {json.dumps(line)}}}",
+                flush=True,
+            )
+            continue
+        if record.get("from") == my_name:
+            continue
+        print(line, flush=True)
+
+    write_cursor(cursor_path, new_offset)
+    return new_offset
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="watch a mesh-channel JSONL file")
+    ap.add_argument("channel")
+    ap.add_argument("my_name")
+    ap.add_argument(
+        "--catch-up",
+        action="store_true",
+        help="start from offset 0 (replay backlog) instead of EOF",
+    )
+    ap.add_argument(
+        "--poll",
+        type=float,
+        default=0.2,
+        help="poll interval in seconds (default 0.2)",
+    )
+    args = ap.parse_args()
+
+    channel_path = Path(args.channel)
+    cursor_path = Path(f"{args.channel}.cursor.{args.my_name}")
+
+    channel_path.touch(exist_ok=True)
+
+    if args.catch_up:
+        cursor = 0
+        write_cursor(cursor_path, cursor)
+    else:
+        cursor = read_cursor(cursor_path)
+        if cursor < 0:
+            cursor = channel_path.stat().st_size
+            write_cursor(cursor_path, cursor)
+
+    last_mtime = -1.0
+    while True:
+        try:
+            st = channel_path.stat()
+        except FileNotFoundError:
+            time.sleep(args.poll)
+            continue
+
+        if st.st_mtime != last_mtime or st.st_size != cursor:
+            last_mtime = st.st_mtime
+            if st.st_size < cursor:
+                cursor = 0
+                write_cursor(cursor_path, cursor)
+            cursor = emit_new_lines(channel_path, cursor_path, args.my_name, cursor)
+
+        time.sleep(args.poll)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

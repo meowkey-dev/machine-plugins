@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# send-prompt — deliver a prompt file to a remote host via scp
+#
+# Usage: send-prompt <local-prompt-file> <host>:<remote-path>
+#
+# Thin scp wrapper. Reads tmux.remote.ssh_opts from config so the same SSH key/options
+# used for the socket forward also work here. Validates the local file exists, copies it
+# to the remote, and reports errors clearly.
+
+set -euo pipefail
+
+die() {
+    echo "send-prompt: error: $*" >&2
+    exit 1
+}
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: send-prompt <local-prompt-file> <host>:<remote-path>" >&2
+    exit 1
+fi
+
+LOCAL_FILE="$1"
+REMOTE_DEST="$2"
+
+[[ -f "$LOCAL_FILE" ]] || die "Local prompt file not found: ${LOCAL_FILE}"
+
+REMOTE_HOST="${REMOTE_DEST%%:*}"
+REMOTE_PATH="${REMOTE_DEST#*:}"
+REMOTE_DIR="$(dirname "$REMOTE_PATH")"
+
+# ── config (ssh_opts) ───────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_config.sh
+source "${SCRIPT_DIR}/_config.sh"
+
+SSH_OPTS=()
+while IFS= read -r opt; do
+    [[ -n "$opt" ]] && SSH_OPTS+=("$opt")
+done < <(_config_nested_list "tmux" "remote" "ssh_opts")
+
+# ── ensure remote directory exists ──────────────────────────────────────────
+
+ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" sh -c 'mkdir -p "$1"' -- "$REMOTE_DIR" 2>/dev/null \
+    || die "Cannot create remote directory ${REMOTE_DIR} on ${REMOTE_HOST}"
+
+# ── copy ────────────────────────────────────────────────────────────────────
+
+scp_output="$(scp -q "${SSH_OPTS[@]}" "$LOCAL_FILE" "$REMOTE_DEST" 2>&1)" || {
+    rc=$?
+    case "$scp_output" in
+        *"Permission denied"*|*"publickey"*)
+            die "SCP auth failed for ${REMOTE_HOST} — check your SSH key or config" ;;
+        *"No such file"*)
+            die "Remote path not accessible: ${REMOTE_DEST}" ;;
+        *"Could not resolve"*|*"No route to host"*|*"Connection refused"*)
+            die "Cannot reach ${REMOTE_HOST} — check the hostname and network" ;;
+        *)
+            die "SCP failed (exit $rc): ${scp_output}" ;;
+    esac
+}

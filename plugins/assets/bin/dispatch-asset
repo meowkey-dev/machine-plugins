@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# dispatch-asset — configurable launcher for the assets plugin
+#
+# Usage:
+#   dispatch-asset --launcher <command> --prompt <prompt-file> [--workdir <path>] [flags]
+#   dispatch-asset --launcher <command> --resume [id] [flags]
+#   dispatch-asset --launcher <command> [flags]    (interactive, no prompt)
+#
+# Reads layered config (local <repo>/.assets/config.yaml > global ~/.claude/plugins/assets/config.yaml
+# > env vars), changes to the configured workdir, sources a sibling .env if present, and exec's the
+# agent CLI on the prompt file. Claude-family launchers receive the prompt on stdin; Codex-family
+# launchers receive it as a positional prompt argument so stdin stays attached to the interactive TTY.
+#
+# Launcher selection (which --launcher to pass) is the controlling agent's responsibility — it reads
+# the launchers list from config and picks based on per-command rules. This script is a dumb shim:
+# it trusts --launcher, verifies the command exists in PATH, and exec's it.
+#
+# IMPORTANT: Always execute this script directly (never source it). If the container shell is fish,
+# execute it with its shebang path: bash dispatch-asset ... — do not `source dispatch-asset ...`.
+
+set -euo pipefail
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+die() {
+    echo "dispatch-asset: error: $*" >&2
+    exit 1
+}
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: dispatch-asset --launcher <command> --prompt <prompt-file> [--workdir <path>] [flags]
+       dispatch-asset --launcher <command> --resume [id] [flags]
+       dispatch-asset --launcher <command> [flags]    (interactive, no prompt)
+
+  --launcher <command>   Agent CLI to use (must be in PATH)
+  --prompt <file>        Path to the prompt file; its contents are fed to the agent
+  --workdir <path>       Working directory override (default: paths.workdir from config)
+  --safe                 Disable yolo mode — keep interactive permission prompts
+  --teams                Enable experimental agent teams
+  --model <model>        Override model (e.g. claude-opus-4-6[1m])
+  --resume [id]          Resume a session (interactive picker if no id given)
+  --continue             Continue the last session in the working directory
+EOF
+    exit 1
+}
+
+# ── argument parsing ─────────────────────────────────────────────────────────
+
+LAUNCHER=""
+PROMPT_FILE=""
+WORKDIR_OVERRIDE=""
+SAFE=false
+TEAMS=false
+MODEL=""
+RESUME=""
+CONTINUE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --launcher)
+            [[ -n "${2:-}" ]] || die "--launcher requires a value"
+            LAUNCHER="$2"; shift 2 ;;
+        --prompt)
+            [[ -n "${2:-}" ]] || die "--prompt requires a value"
+            PROMPT_FILE="$2"; shift 2 ;;
+        --workdir)
+            [[ -n "${2:-}" ]] || die "--workdir requires a value"
+            WORKDIR_OVERRIDE="$2"; shift 2 ;;
+        --safe)
+            SAFE=true; shift ;;
+        --teams)
+            TEAMS=true; shift ;;
+        --model)
+            [[ -n "${2:-}" ]] || die "--model requires a value"
+            MODEL="$2"; shift 2 ;;
+        --resume)
+            if [[ -n "${2:-}" ]] && [[ "$2" != --* ]]; then
+                RESUME="$2"; shift 2
+            else
+                RESUME="__interactive__"; shift
+            fi
+            ;;
+        --continue)
+            CONTINUE=true; shift ;;
+        -h|--help)
+            usage ;;
+        *)
+            die "Unknown argument: $1 (run dispatch-asset --help for usage)" ;;
+    esac
+done
+
+[[ -n "$LAUNCHER" ]] || die "--launcher is required"
+if [[ -n "$PROMPT_FILE" ]]; then
+    [[ -f "$PROMPT_FILE" ]] || die "Prompt file not found: $PROMPT_FILE"
+    PROMPT_FILE="$(realpath -- "$PROMPT_FILE")"
+fi
+
+# ── config loading ────────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_config.sh
+source "${SCRIPT_DIR}/_config.sh"
+
+WORKDIR="$(_config "paths" "workdir" "ASSETS_WORKDIR" "")"
+CUSTOM_LAUNCHER="$(_config "paths" "launcher" "" "")"
+RTK_ALIASES="$(_config "features" "rtk_aliases" "" "false")"
+
+# CLI --workdir takes highest priority
+if [[ -n "$WORKDIR_OVERRIDE" ]]; then
+    WORKDIR="${WORKDIR_OVERRIDE/#\~/$HOME}"
+fi
+if [[ -z "$WORKDIR" ]]; then
+    WORKDIR="$PWD"
+fi
+
+# ── launcher validation ───────────────────────────────────────────────────────
+
+command -v "$LAUNCHER" >/dev/null 2>&1 || die "Launcher '${LAUNCHER}' not found in PATH"
+
+# ── custom launcher override (paths.launcher) ─────────────────────────────────
+
+if [[ -n "$CUSTOM_LAUNCHER" ]]; then
+    [[ -x "$CUSTOM_LAUNCHER" ]] || die "Custom launcher not found or not executable: ${CUSTOM_LAUNCHER}"
+    DELEGATE_ARGS=(--launcher "$LAUNCHER")
+    [[ -n "$PROMPT_FILE" ]] && DELEGATE_ARGS+=(--prompt "$PROMPT_FILE")
+    [[ -n "$WORKDIR_OVERRIDE" ]] && DELEGATE_ARGS+=(--workdir "$WORKDIR_OVERRIDE")
+    [[ "$SAFE" == true ]] && DELEGATE_ARGS+=(--safe)
+    [[ "$TEAMS" == true ]] && DELEGATE_ARGS+=(--teams)
+    [[ -n "$MODEL" ]] && DELEGATE_ARGS+=(--model "$MODEL")
+    [[ -n "$RESUME" ]] && { [[ "$RESUME" == "__interactive__" ]] && DELEGATE_ARGS+=(--resume) || DELEGATE_ARGS+=(--resume "$RESUME"); }
+    [[ "$CONTINUE" == true ]] && DELEGATE_ARGS+=(--continue)
+    exec "$CUSTOM_LAUNCHER" "${DELEGATE_ARGS[@]}"
+fi
+
+# ── source .env from workdir if present ──────────────────────────────────────
+
+if [[ -f "${WORKDIR}/.env" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "${WORKDIR}/.env"
+    set +a
+fi
+
+# ── RTK aliases for token savings ────────────────────────────────────────────
+
+if [[ "$RTK_ALIASES" == "true" ]] && command -v rtk >/dev/null 2>&1; then
+    _rtk_env="$(mktemp)"
+    [[ -n "${BASH_ENV:-}" ]] && printf '. "%s"\n' "$BASH_ENV" > "$_rtk_env"
+    printf 'shopt -s expand_aliases\nalias ls="rtk ls"\nalias find="rtk find"\nalias git="rtk git"\n' >> "$_rtk_env"
+    export BASH_ENV="$_rtk_env"
+fi
+
+# ── agent teams ──────────────────────────────────────────────────────────────
+
+if [[ "$TEAMS" == true ]]; then
+    export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+fi
+
+# ── build CLI args ────────────────────────────────────────────────────────────
+
+CLI_ARGS=()
+if [[ "$SAFE" == false ]]; then
+    case "$LAUNCHER" in
+        *laude*) CLI_ARGS+=(--dangerously-skip-permissions) ;;
+        *odex*)  CLI_ARGS+=(--dangerously-bypass-approvals-and-sandbox) ;;
+        *)       echo "dispatch-asset: warn: unknown launcher family '$LAUNCHER' — no skip-permissions flag applied" >&2 ;;
+    esac
+fi
+if [[ -n "$MODEL" ]]; then
+    CLI_ARGS+=(--model "$MODEL")
+fi
+if [[ "$RESUME" == "__interactive__" ]]; then
+    CLI_ARGS+=(--resume)
+elif [[ -n "$RESUME" ]]; then
+    CLI_ARGS+=(--resume "$RESUME")
+elif [[ "$CONTINUE" == true ]]; then
+    CLI_ARGS+=(-c)
+fi
+
+# ── exec ──────────────────────────────────────────────────────────────────────
+
+cd "$WORKDIR" || die "Cannot change to workdir: ${WORKDIR}"
+
+if [[ -n "$PROMPT_FILE" ]]; then
+    if [[ "$LAUNCHER" == *odex* ]]; then
+        PROMPT_CONTENT="$(< "$PROMPT_FILE")"
+        exec "$LAUNCHER" "${CLI_ARGS[@]}" -- "$PROMPT_CONTENT"
+    fi
+    exec "$LAUNCHER" "${CLI_ARGS[@]}" < "$PROMPT_FILE"
+else
+    exec "$LAUNCHER" "${CLI_ARGS[@]}"
+fi

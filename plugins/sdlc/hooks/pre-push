@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# sdlc TDD soft-gate: warn on push if code changed but no tests touched.
+# Soft — never blocks. Hard enforcement lives in the qa subagent + CI.
+#
+# Tunables from `.githooks/sdlc.env`. Keys: CODE_GLOB, TEST_DIR.
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+[[ -f "$(git rev-parse --show-toplevel)/.githooks/sdlc.env" ]] && source "$(git rev-parse --show-toplevel)/.githooks/sdlc.env"
+CODE_GLOB="${CODE_GLOB:-*.py}"
+TEST_DIR="${TEST_DIR:-tests}"
+
+# Resolve the repo's default branch (don't hardcode `main` — a repo on
+# master/trunk would otherwise get an empty base and the gate would silently
+# never fire). Prefer the configured value, else origin/HEAD, else `main`.
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-}"
+if [[ -z "$DEFAULT_BRANCH" ]]; then
+  # symbolic-ref, not rev-parse --abbrev-ref — the latter echoes "HEAD" on a
+  # missing ref instead of failing to empty, defeating the `:-main` fallback.
+  DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
+  DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Skip deletes
+  [[ "$local_sha" == "0000000000000000000000000000000000000000" ]] && continue
+
+  if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]]; then
+    base=$(git merge-base "$local_sha" "origin/${DEFAULT_BRANCH}" 2>/dev/null || true)   # new branch → diff vs default branch
+  else
+    base="$remote_sha"
+  fi
+  if [[ -z "${base:-}" ]]; then
+    echo "pre-push (TDD warn): could not resolve a diff base (origin/${DEFAULT_BRANCH} unreachable?) — gate skipped for this ref." >&2
+    continue
+  fi
+
+  # `|| =0` guards: an unreachable $base (shallow clone / missing fetch) makes
+  # git diff exit nonzero, which would propagate and abort the push before
+  # `exit 0` — hard-blocking despite the soft-gate contract.
+  code_changed=$(git diff --name-only "$base..$local_sha" -- "$CODE_GLOB" 2>/dev/null | wc -l) || code_changed=0
+  tests_changed=$(git diff --name-only "$base..$local_sha" -- "$TEST_DIR" 2>/dev/null | wc -l) || tests_changed=0
+
+  if [[ "$code_changed" -gt 0 && "$tests_changed" -eq 0 ]]; then
+    echo "pre-push (TDD warn): $code_changed code change(s) ($CODE_GLOB); 0 $TEST_DIR/ changes." >&2
+    echo "  Consider adding tests before pushing." >&2
+  fi
+done
+
+exit 0
