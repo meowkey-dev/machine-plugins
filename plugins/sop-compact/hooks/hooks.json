@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact.sh"}
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh"}
+        ]
+      }
+    ]
+  }
+}

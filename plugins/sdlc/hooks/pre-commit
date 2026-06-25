@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# sdlc SDD soft-gate: warn if invariant code paths changed without a contract-doc edit.
+# Soft — never blocks. Hard enforcement lives in the qa subagent + CI review.
+#
+# Tunables come from `.githooks/sdlc.env` (written by install-git-hooks from
+# .claude/sdlc.toml, or defaults). Keys: INVARIANT_PATHS, SPEC_DOC.
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+[[ -f "$(git rev-parse --show-toplevel)/.githooks/sdlc.env" ]] && source "$(git rev-parse --show-toplevel)/.githooks/sdlc.env"
+INVARIANT_PATHS="${INVARIANT_PATHS:-src}"
+SPEC_DOC="${SPEC_DOC:-SPEC.md}"
+
+# Split INVARIANT_PATHS (space-separated, possibly multiple paths) into an array
+# and pass each as a quoted arg — an unquoted `$INVARIANT_PATHS` would be
+# shell-glob-expanded against the filesystem before git sees it, mangling any
+# pathspec containing *, [], or ?. Quoting lets GIT do the pathspec globbing.
+read -ra _paths <<< "$INVARIANT_PATHS"
+
+# `|| =0` guards: under `set -euo pipefail`, a nonzero `git diff` (corrupt/locked
+# index) would propagate through the assignment and abort the commit before
+# `exit 0` — hard-blocking despite the soft-gate contract.
+changed_invariant=$(git diff --cached --name-only -- "${_paths[@]}" 2>/dev/null | wc -l) || changed_invariant=0
+changed_spec=$(git diff --cached --name-only -- "$SPEC_DOC" 2>/dev/null | wc -l) || changed_spec=0
+
+if [[ "$changed_invariant" -gt 0 && "$changed_spec" -eq 0 ]]; then
+  echo "pre-commit (SDD warn): $changed_invariant file(s) under invariant paths ($INVARIANT_PATHS) changed but $SPEC_DOC is untouched." >&2
+  echo "  If this modifies a runtime contract, edit $SPEC_DOC in the same commit. Otherwise OK — proceeding." >&2
+fi
+
+exit 0

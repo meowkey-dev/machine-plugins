@@ -1,0 +1,13 @@
+{
+  "name": "sop-compact",
+  "description": "Hooks-only compaction-survival procedure for Claude Code. A PreCompact hook auto-bootstraps a per-repo .claude/sop-compact.md on first compact, then runs a claude -p sidecar that promotes durable learnings and writes a handoff snapshot before /compact; a SessionStart hook (gated on source=compact) points the new session at the latest handoff. No user-typed /compact argument needed and no per-repo init step — works with bare /compact (manual or auto).",
+  "version": "0.6.0",
+  "keywords": [
+    "session",
+    "compact",
+    "continuity",
+    "hooks",
+    "snapshot",
+    "handoff"
+  ]
+}

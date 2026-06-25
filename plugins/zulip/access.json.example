@@ -1,0 +1,7 @@
+{
+  "allowedStreams": ["general", "engineering"],
+  "deniedStreams": [],
+  "requireMention": true,
+  "allowedUsers": [],
+  "deniedUsers": []
+}

@@ -1,0 +1,13 @@
+{
+  "name": "channel-nudge",
+  "description": "Hooks-only console-drift detector for the discord/zulip/wechat channels. One Stop hook runs once per turn, reads the transcript once, and checks every channel in a single process — on drift, emits a soft, non-blocking hookSpecificOutput.additionalContext (a verify-before-resend nudge into the drifting instance's next-turn context — instance-facing self-heal, no console banner). CJK codepoints are weight-2 toward the 80-char prose threshold so a ~40-hanzi answer is caught.",
+  "version": "0.2.2",
+  "keywords": [
+    "channel",
+    "discord",
+    "zulip",
+    "wechat",
+    "hooks",
+    "stop"
+  ]
+}

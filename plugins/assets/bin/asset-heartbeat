@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# asset-heartbeat — no-progress heartbeat for a dispatched asset.
+#
+# Wakes the controller ONLY when an asset looks STUCK: its tmux pane has not
+# changed across a full heartbeat interval (frozen / parked / hung), it is
+# sitting on a permission prompt, or its window vanished. A healthy, working
+# asset changes its pane every interval, so this stays SILENT during normal
+# progress — same noise-floor discipline as a completion-only monitor.
+#
+# Why it exists: a controller↔asset message (mesh-channel, tmux --continue)
+# reaches the asset only at a TURN BOUNDARY. An asset parked idle PAST its last
+# turn (e.g. waiting for an OK after posting a plan) is not re-woken by a new
+# message — so a silent park can sit unnoticed until a manual check-in. The
+# heartbeat is the safety net that surfaces that park; the reliable un-park
+# action once it fires is a tmux `--continue` nudge (forces a fresh turn).
+#
+# Usage (wrap in the controller's Monitor tool, persistent):
+#   asset-heartbeat <name> [interval_sec]
+#
+# Args:
+#   $1  asset/window name (required), e.g. issue-754
+#   $2  interval seconds (default: monitoring.heartbeat_interval_min * 60, else 1800)
+#
+# Config (layered local > global > env > default, via _config.sh):
+#   tmux.socket              ASSETS_TMUX_SOCKET
+#   tmux.session             ASSETS_TMUX_SESSION
+#   paths.signals            ASSETS_SIGNALS_DIR
+#   monitoring.heartbeat_interval_min  ASSETS_HEARTBEAT_INTERVAL_MIN  (default 30)
+#
+# Caveat: a frozen pane is a HEURISTIC for stuck, not proof — an asset doing a
+# long single tool call (e.g. a slow remote probe) can legitimately freeze the
+# pane for one interval. The heartbeat reports "no visible progress"; the
+# controller peeks / asks the asset to disambiguate. False-quiet (a real park
+# going unnoticed) is the failure this prevents.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_config.sh
+source "${SCRIPT_DIR}/_config.sh"
+
+NAME="${1:?asset name required (e.g. issue-754)}"
+
+SOCKET="$(_config "tmux" "socket" "ASSETS_TMUX_SOCKET" "")"
+SESSION="$(_config "tmux" "session" "ASSETS_TMUX_SESSION" "")"
+SIGNALS="$(_config "paths" "signals" "ASSETS_SIGNALS_DIR" "")"
+
+[[ -n "$SOCKET" ]]  || { echo "asset-heartbeat: tmux.socket not configured"  >&2; exit 2; }
+[[ -n "$SESSION" ]] || { echo "asset-heartbeat: tmux.session not configured" >&2; exit 2; }
+[[ -n "$SIGNALS" ]] || { echo "asset-heartbeat: paths.signals not configured" >&2; exit 2; }
+
+# Interval: explicit arg > config minutes > 30 min default.
+INTERVAL="${2:-}"
+if [[ -z "$INTERVAL" ]]; then
+  mins="$(_config "monitoring" "heartbeat_interval_min" "ASSETS_HEARTBEAT_INTERVAL_MIN" "30")"
+  INTERVAL=$(( mins * 60 ))
+fi
+
+DONE_FILE="${SIGNALS}/${NAME}.done"
+
+# Normalize a pane capture so a live spinner doesn't read as "progress":
+#   - strip the rotating spinner GLYPH (claude-code animates ✶✷✸…/braille while
+#     a tool call is in flight; capture-pane grabs whatever glyph shows at that
+#     instant, so two captures differ on the glyph alone — without this strip a
+#     HUNG-but-spinning tool call reads as progress and never fires)
+#   - drop standalone digit/timer tokens ("1m 33s", "(17s)", diff-gutter nums)
+#   - collapse whitespace
+# What remains is semantic content — file names, prose, prompts, the spinner's
+# verb — which only changes when the asset actually advances.
+_normalized_pane() {
+  tmux -S "$SOCKET" capture-pane -t "${SESSION}:${NAME}" -p -S -30 2>/dev/null \
+    | sed -E 's/[✶✷✸✹✺✻✼✽✦✧⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]//g; s/\([0-9]+m?[[:space:]]*[0-9]*s?\)//g; s/[0-9]+m[[:space:]]+[0-9]+s//g; s/[0-9]+s\b//g; s/^[[:space:]]*[0-9]+[[:space:]]*//; s/[[:space:]]+/ /g' \
+    || true
+}
+
+# Permission-prompt signatures across claude-code versions. Capture into a var
+# first, THEN grep — piping capture-pane directly into `grep -q` lets grep close
+# the pipe on first match, and under `set -o pipefail` the SIGPIPE'd tmux can
+# flip the result nonzero even on a real match (a premature exit silently
+# defeats the safety net).
+_on_permission_prompt() {
+  local pane
+  pane="$(tmux -S "$SOCKET" capture-pane -t "${SESSION}:${NAME}" -p -S -12 2>/dev/null || true)"
+  printf '%s\n' "$pane" | grep -qiE "do you want to (proceed|allow)|❯ 1\.|│ 1\. Yes|Allow this tool"
+}
+
+prev=""
+first=1
+while true; do
+  # Done latch wins — if the asset completed, say so and exit.
+  if [ -f "$DONE_FILE" ]; then
+    echo "HEARTBEAT ${NAME}: .done present — $(head -c 200 "$DONE_FILE" 2>/dev/null)"
+    break
+  fi
+
+  # Window gone = asset recalled/crashed. Capture into a var before grep (same
+  # pipefail/SIGPIPE guard as the prompt check — a false "window gone" would
+  # retire the heartbeat early).
+  windows="$(tmux -S "$SOCKET" list-windows -t "$SESSION" -F '#W' 2>/dev/null || true)"
+  if ! printf '%s\n' "$windows" | grep -qx "$NAME"; then
+    echo "HEARTBEAT ${NAME}: tmux window gone (recalled or crashed) — check before re-dispatch."
+    break
+  fi
+
+  if _on_permission_prompt; then
+    echo "HEARTBEAT ${NAME}: appears to be on a PERMISSION PROMPT — needs an approval keystroke."
+  fi
+
+  cur="$(_normalized_pane)"
+  if [ "$first" -eq 1 ]; then
+    first=0          # baseline capture; assume working, stay silent
+  elif [ -n "$cur" ] && [ "$cur" = "$prev" ]; then
+    last_line="$(tmux -S "$SOCKET" capture-pane -t "${SESSION}:${NAME}" -p -S -4 2>/dev/null | grep -vE '^[[:space:]]*$' | tail -1 || true)"
+    mins=$(( INTERVAL / 60 ))
+    echo "HEARTBEAT ${NAME}: NO VISIBLE PROGRESS in ${mins}m (pane frozen) — possibly parked waiting for the controller, or a stalled tool call. Last line: ${last_line}"
+  fi
+  prev="$cur"
+
+  sleep "$INTERVAL"
+done

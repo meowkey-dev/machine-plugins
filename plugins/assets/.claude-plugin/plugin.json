@@ -1,0 +1,12 @@
+{
+  "name": "assets",
+  "description": "Local or remote tmux agent dispatch — spawn, monitor, and recall long-running coding agents in dedicated tmux windows. SSH socket-forwarding for remote dispatch, configurable launcher map, harness-emitted lifecycle signals (boot / turn_end / exit + activity-mtime) on the claude-family path, signal-file completion + no-progress heartbeat fallback for non-claude, and PR-completion + subagent-peek health checks.",
+  "version": "0.4.0",
+  "keywords": [
+    "tmux",
+    "agents",
+    "dispatch",
+    "orchestration",
+    "automation"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "mesh-channel",
+  "description": "Simple two-agent comms over a shared JSONL file. Append-only protocol, per-agent cursor, by-name self-filtering. Pairs with the Monitor tool for event-driven wake — no polling in the agent's loop.",
+  "version": "0.1.2",
+  "keywords": [
+    "mesh",
+    "comms",
+    "agents",
+    "jsonl",
+    "monitor"
+  ]
+}

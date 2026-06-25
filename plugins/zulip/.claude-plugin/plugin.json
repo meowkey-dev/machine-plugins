@@ -1,0 +1,11 @@
+{
+  "name": "zulip",
+  "description": "Zulip channel for Claude Code — event-queue bridge with access control. Supports stdio (plugin) and SSE (standalone) modes.",
+  "version": "1.3.0",
+  "keywords": [
+    "zulip",
+    "messaging",
+    "channel",
+    "mcp"
+  ]
+}

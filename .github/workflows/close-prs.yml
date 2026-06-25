@@ -1,0 +1,29 @@
+# This repository is a generated build artifact: its tree is force-pushed from
+# private source on every publish. Pull requests against it can never be merged
+# (the next publish would overwrite them), so this workflow politely closes any
+# PR that is opened or reopened and directs contributors to open an issue.
+#
+# Safety note on `pull_request_target`: this trigger runs in the context of the
+# base repo with a writable token. That is only dangerous when combined with a
+# checkout of untrusted PR code — this job does NOT check out any code. It only
+# calls `gh pr close`, so there is no path for PR-controlled code to execute.
+name: Close pull requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close PR with a comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr close "$PR" --repo "$GITHUB_REPOSITORY" --comment \
+            "Thanks for the contribution! This repository is a generated build artifact — its contents are published automatically from private source, so pull requests here cannot be merged (the next publish would overwrite them). Please open an issue instead, or contribute upstream. Closing automatically."

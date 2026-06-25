@@ -1,0 +1,14 @@
+{
+  "name": "sdlc",
+  "description": "Software-development-lifecycle harness for Claude Code — a closed loop that takes a GitHub issue to a mergeable PR. Repo-agnostic methodology: backlog → dispatch → (asset builds) → report → wrap-up (merge + review + cleanup) → retro, with a qa subagent and SDD/TDD soft gates. wrap-up is the blessed merge path (binds the per-PR review to the merge). PLAYBOOK.md is a reinforcement ledger over memory (review/retro increment reinforced/contradicted counts on memory-backed entries, never write prose). Each consuming repo supplies only its own artifacts (PLAYBOOK.md, memory, a domain brief) via convention + a minimal optional .claude/sdlc.toml. Depends on assets (the asset runtime); control↔asset comms are async over the GitHub issue/PR.",
+  "version": "0.5.3",
+  "keywords": [
+    "sdlc",
+    "closed-loop",
+    "agents",
+    "dispatch",
+    "review",
+    "retro",
+    "automation"
+  ]
+}

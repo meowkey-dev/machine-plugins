@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# asset-signal — emit a lifecycle signal for the dispatched asset.
+#
+# Invoked by CC hooks injected at dispatch time (see dispatch-asset). One helper,
+# one positional arg = which event:
+#
+#   asset-signal boot       (wired to SessionStart)
+#   asset-signal activity   (wired to PostToolUse — fast path: bare mtime touch)
+#   asset-signal turn_end   (wired to Stop)
+#   asset-signal exit       (wired to SessionEnd)
+#
+# Env (exported by dispatch-asset):
+#   ASSET_NAME           — used as the "asset" field and in signal-file names
+#   ASSETS_SIGNALS_DIR   — directory to write signal files into
+#
+# Output:
+#   - boot / turn_end / exit  → append one JSONL line to <signals>/<name>.jsonl
+#   - activity                → touch <signals>/<name>.activity (no JSONL append)
+#
+# Invariants:
+#   - ALWAYS exits 0. A signal-write failure (read-only fs, malformed input,
+#     transcript-parse bug, etc.) must NEVER break the asset's hook chain.
+#   - PostToolUse path does not parse stdin and does not invoke python — it
+#     fires on every tool call, so it stays bash-only.
+
+EVENT="${1:-}"
+NAME="${ASSET_NAME:-unknown}"
+DIR="${ASSETS_SIGNALS_DIR:-}"
+
+# No signals dir → nowhere to write. Silent no-op preserves exit-0 invariant.
+if [ -z "$DIR" ]; then
+    exit 0
+fi
+
+mkdir -p "$DIR" 2>/dev/null || true
+
+# Fast path: bare mtime touch on every tool call.
+if [ "$EVENT" = "activity" ]; then
+    touch "${DIR}/${NAME}.activity" 2>/dev/null || true
+    exit 0
+fi
+
+JSONL="${DIR}/${NAME}.jsonl"
+
+# Other events: parse the hook JSON on stdin and append one JSONL line.
+# python3 handles JSON escaping (quotes, newlines, backslashes in last_message)
+# correctly without a jq dependency. All errors are swallowed — exit 0 always.
+python3 -c '
+import json, sys, time
+
+event, name, jsonl_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+try:
+    raw = sys.stdin.read()
+    inp = json.loads(raw) if raw.strip() else {}
+    if not isinstance(inp, dict):
+        inp = {}
+except Exception:
+    inp = {}
+
+def _last_from_transcript(path):
+    # Fallback for hosts where Stop does not include last_assistant_message:
+    # walk the JSONL transcript and grab the final assistant text block.
+    if not isinstance(path, str):
+        return None
+    try:
+        last = None
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("type") != "assistant":
+                    continue
+                msg = rec.get("message") or {}
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text")
+                            if isinstance(text, str) and text.strip():
+                                last = text
+                elif isinstance(content, str) and content.strip():
+                    last = content
+        return last
+    except Exception:
+        return None
+
+out = {
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "asset": name,
+    "event": event,
+}
+
+if event == "boot":
+    for k in ("session_id", "cwd", "source"):
+        v = inp.get(k)
+        if isinstance(v, str):
+            out[k] = v
+elif event == "turn_end":
+    last = inp.get("last_assistant_message")
+    if not isinstance(last, str) or not last.strip():
+        last = _last_from_transcript(inp.get("transcript_path"))
+    if isinstance(last, str) and last.strip():
+        out["last_message"] = last[:500]
+    else:
+        out["last_message"] = None
+elif event == "exit":
+    v = inp.get("reason")
+    if isinstance(v, str):
+        out["reason"] = v
+else:
+    # Unknown event name — still emit so the absence-of-event is visible.
+    pass
+
+try:
+    line = json.dumps(out, ensure_ascii=False)
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+except Exception:
+    pass
+' "$EVENT" "$NAME" "$JSONL" 2>/dev/null
+
+exit 0

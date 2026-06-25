@@ -1,0 +1,69 @@
+# assets plugin configuration
+#
+# Place at one of two locations (field-level merge; local overrides global):
+#   ~/.claude/plugins/assets/config.yaml        — per-user global config
+#   <repo>/.claude/assets/config.yaml           — repo-local override (committed or gitignored)
+# Scaffold either with /init-assets-config (add --global for the per-user path).
+# Legacy <repo>/.assets/config.yaml still works as a fallback (deprecation warning); dropped v0.4.0.
+#
+# A local file that only sets tmux.socket does NOT need to repeat the launchers list from global.
+#
+# Env-var fallbacks are the ultimate override for individual fields (useful for CI):
+#   ASSETS_TMUX_SOCKET, ASSETS_TMUX_SESSION, ASSETS_WORKDIR, ASSETS_SIGNALS_DIR
+
+# ── tmux ─────────────────────────────────────────────────────────────────────
+tmux:
+  socket: /home/<user>/<workdir>/tmux.sock   # env: ASSETS_TMUX_SOCKET
+  session: assets                             # env: ASSETS_TMUX_SESSION
+
+  # ── remote (optional) ──────────────────────────────────────────────────────
+  # Uncomment to have the plugin manage an SSH socket-forward to a remote tmux server.
+  # When absent, the plugin treats tmux.socket as a normal local socket (Case 1 / v0.1 behavior).
+  # remote:
+  #   host: remote-host                       # SSH target (uses ~/.ssh/config aliases)
+  #   socket: /home/<user>/tmux.sock          # remote-side tmux socket path
+  #   ssh_opts: []                            # optional; extra args passed to ssh (e.g. ["-i", "~/.ssh/key"])
+
+# ── paths ────────────────────────────────────────────────────────────────────
+paths:
+  workdir: /home/<user>/<workdir>            # where asset clones live; env: ASSETS_WORKDIR
+  signals: /home/<user>/<workdir>/signals    # signal-file directory; env: ASSETS_SIGNALS_DIR
+  # launcher: /path/to/custom/dispatch-asset # override the bundled launcher script
+
+# ── launchers ────────────────────────────────────────────────────────────────
+# Each entry: command (the identifier, used with --launcher <command>) + rule (surfaced to
+# the controlling agent so it picks the right launcher without having to remember the matrix).
+launchers:
+  - command: claude
+    rule: "Default. Use unless the task requires a non-Anthropic-API auth path."
+  - command: codex
+    rule: "Use for OpenAI-API-authed work or A/B comparison vs CC on the same task."
+  # Add more launchers for other agent CLIs as needed:
+  # - command: aider
+  #   rule: "Use for tasks that benefit from aider's diff-based patch workflow."
+
+# ── approval ─────────────────────────────────────────────────────────────────
+approval:
+  style: ui                 # 'ui' (CC permission prompt) | 'verbal' (agent asks in chat)
+  new_dispatch: required    # 'required' | 'optional' | 'never'
+  continue: optional
+  recall: optional
+
+# ── features ─────────────────────────────────────────────────────────────────
+features:
+  rtk_aliases: false             # set true if rtk is installed — enables token-saving
+                                 # aliases (ls, find, git) for dispatched agents
+
+# ── monitoring ───────────────────────────────────────────────────────────────
+monitoring:
+  default_strategy: signal          # 'signal' | 'cron' | 'none'
+  signal_poll_interval_sec: 5
+  signal_timeout_min: 30
+  health_check_at_min: 10
+  heartbeat_interval_min: 30        # bin/asset-heartbeat poll interval (no-progress detector)
+  harness_signals: true             # claude-family launchers only: inject CC hooks at dispatch
+                                    # time so the asset's own harness emits boot / activity /
+                                    # turn_end / exit signals (replaces the prompted .done shim
+                                    # and the pane-diff heartbeat for claude assets). Codex and
+                                    # other non-claude launchers keep the pane-heuristic path.
+                                    # Env override: ASSETS_HARNESS_SIGNALS

@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ensure-tmux-forward — idempotent SSH socket-forward for remote tmux
+#
+# Usage: ensure-tmux-forward
+#
+# Reads layered config to resolve tmux.remote.{host, socket, ssh_opts} and tmux.socket (local).
+# If tmux.remote is not configured, exits 0 (no-op — the plugin treats it as a local socket).
+# If configured, ensures an SSH local-forward is healthy: health-checks the local socket,
+# reaps stale pidfiles, spawns a new forward if needed, and polls for readiness.
+
+set -euo pipefail
+
+die() {
+    echo "ensure-tmux-forward: error: $*" >&2
+    exit 1
+}
+
+# ── config ──────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_config.sh
+source "${SCRIPT_DIR}/_config.sh"
+
+LOCAL_SOCKET="$(_config "tmux" "socket" "ASSETS_TMUX_SOCKET" "")"
+REMOTE_HOST="$(_config_nested "tmux" "remote" "host" "" "")"
+REMOTE_SOCKET="$(_config_nested "tmux" "remote" "socket" "" "")"
+
+# No remote configured — nothing to do (Case 1 / v0.1 behavior)
+if [[ -z "$REMOTE_HOST" ]]; then
+    exit 0
+fi
+
+[[ -n "$LOCAL_SOCKET" ]] || die "tmux.socket is required when tmux.remote is configured"
+[[ -n "$REMOTE_SOCKET" ]] || die "tmux.remote.socket is required"
+
+# Read ssh_opts into an array
+SSH_OPTS=()
+while IFS= read -r opt; do
+    [[ -n "$opt" ]] && SSH_OPTS+=("$opt")
+done < <(_config_nested_list "tmux" "remote" "ssh_opts")
+
+PIDFILE="${LOCAL_SOCKET}.pid"
+
+# ── health check ────────────────────────────────────────────────────────────
+
+if tmux -S "$LOCAL_SOCKET" list-sessions >/dev/null 2>&1; then
+    exit 0
+fi
+
+# ── stale pidfile reap ──────────────────────────────────────────────────────
+
+if [[ -f "$PIDFILE" ]]; then
+    old_pid="$(cat "$PIDFILE" 2>/dev/null)" || true
+    if [[ -n "$old_pid" ]] && ! kill -0 "$old_pid" 2>/dev/null; then
+        rm -f "$PIDFILE"
+        rm -f "$LOCAL_SOCKET"
+    fi
+fi
+
+# If the forward is still alive (pidfile exists and process is running), re-check socket
+if [[ -f "$PIDFILE" ]]; then
+    old_pid="$(cat "$PIDFILE" 2>/dev/null)" || true
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+        # Process is alive but socket didn't respond — give it a moment
+        for _ in $(seq 1 50); do
+            if tmux -S "$LOCAL_SOCKET" list-sessions >/dev/null 2>&1; then
+                exit 0
+            fi
+            sleep 0.1
+        done
+        die "SSH forward (pid $old_pid) is running but tmux socket is not responding — remote tmux server may not be running at ${REMOTE_SOCKET} on ${REMOTE_HOST}"
+    fi
+fi
+
+# ── spawn SSH forward ───────────────────────────────────────────────────────
+
+# Remove stale socket file before spawning
+rm -f "$LOCAL_SOCKET"
+
+# Ensure parent directory exists
+mkdir -p "$(dirname "$LOCAL_SOCKET")"
+
+ssh_output="$(ssh -fN -L "${LOCAL_SOCKET}:${REMOTE_SOCKET}" "${SSH_OPTS[@]}" "$REMOTE_HOST" 2>&1)" || {
+    rc=$?
+    case "$ssh_output" in
+        *"Permission denied"*|*"publickey"*)
+            die "SSH auth failed for ${REMOTE_HOST} — check your SSH key or config" ;;
+        *"Could not resolve"*|*"No route to host"*|*"Connection refused"*|*"Connection timed out"*)
+            die "Cannot reach ${REMOTE_HOST} — check the hostname and network" ;;
+        *)
+            die "SSH forward failed (exit $rc): ${ssh_output}" ;;
+    esac
+}
+
+# Find the SSH process and write pidfile
+# ssh -fN forks to background; find it by the forward spec
+ssh_pid=""
+ssh_pid="$(pgrep -f "ssh.*-L.*${LOCAL_SOCKET}:${REMOTE_SOCKET}.*${REMOTE_HOST}" 2>/dev/null | tail -1)" || true
+
+if [[ -n "$ssh_pid" ]]; then
+    echo "$ssh_pid" > "$PIDFILE"
+fi
+
+# ── poll for socket ─────────────────────────────────────────────────────────
+
+for _ in $(seq 1 50); do
+    if tmux -S "$LOCAL_SOCKET" list-sessions >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+
+die "SSH forward started but tmux socket did not appear within 5s — the remote tmux server may not be running at ${REMOTE_SOCKET} on ${REMOTE_HOST}"
